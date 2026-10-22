@@ -1,0 +1,76 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build mobile web assets and sync Capacitor
+        working-directory: frontend
+        run: npm run build:mobile
+
+      - name: Archive unsigned iOS app
+        working-directory: frontend/ios/App
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(node -p "require('../../package.json').version")"
+          BUILD_NUMBER="$(sed -n 's/^ *versionCode \([0-9]*\).*/\1/p' ../../android/app/build.gradle | head -n 1)"
+          if [ -z "$BUILD_NUMBER" ]; then
+            echo "Could not read versionCode from frontend/android/app/build.gradle" >&2
+            exit 1
+          fi
+
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/App.xcarchive" \
+            MARKETING_VERSION="$APP_VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive | tail -40
+
+          mkdir -p Payload
+          cp -R build/App.xcarchive/Products/Applications/App.app Payload/
+          IPA_PATH="$GITHUB_WORKSPACE/openGym-${APP_VERSION}-unsigned.ipa"
+          zip -qr "$IPA_PATH" Payload
+          shasum -a 256 "$IPA_PATH" > "$IPA_PATH.sha256"
+          cat "$IPA_PATH.sha256"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openGym-unsigned-ipa-${{ github.run_number }}
+          path: |
+            openGym-*-unsigned.ipa
+            openGym-*-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
